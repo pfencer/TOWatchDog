@@ -45,7 +45,16 @@ src/TOWatchDog/
 │   └── RestartPolicy.cs             # Enum politica di riavvio
 └── Monitoring/
     └── ApplicationSupervisor.cs      # Ciclo avvio → attesa → riavvio per un applicativo
+
+samples/DemoApp/                      # App WinForms di test (solo Windows)
+└── ...                               # Provoca crash, hang, consumo risorse a comando
 ```
+
+## Applicazione di test
+
+In `samples/DemoApp` è presente un'applicazione WinForms (solo Windows) per verificare dal vivo
+tutti i meccanismi di monitoraggio (crash, uscita con codice errore, hang/NotResponding, stop del
+file heartbeat, consumo di memoria e CPU). Vedi [samples/DemoApp/README.md](samples/DemoApp/README.md).
 
 ## Prerequisiti
 
