@@ -19,6 +19,11 @@ Può girare come normale applicazione console, come **servizio Windows** o come 
   scorrevole (`RestartWindowSeconds`), per evitare cicli di riavvio senza fine.
 - Ritardo di avvio iniziale (`StartupDelaySeconds`) per scaglionare gli avvii o attendere dipendenze.
 - Possibilità di **agganciarsi** a un processo già in esecuzione (`AttachToExisting`).
+- **Health-check periodico** con riavvio forzato al superamento delle soglie:
+  - stato **NotResponding** (app appesa/bloccata) — solo Windows, app con finestra;
+  - **memoria** (working set) oltre soglia;
+  - **CPU** oltre soglia (percentuale normalizzata sul totale dei core);
+  - tolleranza configurabile di N controlli falliti consecutivi prima del riavvio.
 - Arresto controllato (graceful shutdown) dei processi sorvegliati allo stop del watchdog.
 - Variabili d'ambiente aggiuntive per processo.
 - Logging strutturato tramite `Microsoft.Extensions.Logging`.
@@ -73,6 +78,26 @@ Gli applicativi da sorvegliare si definiscono nella sezione `Watchdog:Applicatio
 | `AttachToExisting` | bool | `false` | Aggancia un processo omonimo già in esecuzione. |
 | `GracefulShutdownTimeoutSeconds` | int | `10` | Attesa per la chiusura pulita allo stop. |
 | `Environment` | object | `{}` | Variabili d'ambiente aggiuntive. |
+| `HealthCheckIntervalSeconds` | int | `0` | Intervallo dei controlli di integrità (`0` = disabilitati). |
+| `EnableNotRespondingCheck` | bool | `false` | Rileva lo stato NotResponding (solo Windows, app con finestra). |
+| `MaxMemoryMB` | long | `0` | Soglia memoria working set in MB (`0` = disabilitato). |
+| `MaxCpuPercent` | int | `0` | Soglia CPU % sul totale dei core, 0-100 (`0` = disabilitato). |
+| `UnhealthyChecksBeforeRestart` | int | `3` | Controlli falliti consecutivi tollerati prima del riavvio forzato. |
+
+### Monitoraggio risorse e stato "non risponde"
+
+Se `HealthCheckIntervalSeconds > 0`, un monitor parallelo campiona il processo a quell'intervallo
+e ne verifica reattività, memoria e CPU. Quando una o più metriche restano oltre soglia per
+`UnhealthyChecksBeforeRestart` controlli **consecutivi**, il watchdog **forza la terminazione**
+del processo (`Kill` dell'intero albero) e ne innesca il riavvio secondo le normali regole.
+
+> **Nota su NotResponding:** `Process.Responding` è significativo solo su **Windows** per
+> applicazioni dotate di finestra e message pump (GUI). Per processi console o su Linux/macOS il
+> controllo non è applicabile e viene ignorato; memoria e CPU restano invece disponibili su tutte
+> le piattaforme.
+>
+> La percentuale CPU è **normalizzata sul totale dei core** (0-100): 100% significa saturazione di
+> tutti i core della macchina.
 
 ### Esempio
 

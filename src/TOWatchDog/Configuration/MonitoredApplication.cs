@@ -85,4 +85,41 @@ public sealed class MonitoredApplication
     /// </summary>
     public IDictionary<string, string?> Environment { get; set; }
         = new Dictionary<string, string?>();
+
+    // ----- Monitoraggio risorse e stato "non risponde" -----
+
+    /// <summary>
+    /// Intervallo (in secondi) tra un controllo di integrità e il successivo.
+    /// Il valore 0 disabilita completamente il monitoraggio di risorse e reattività.
+    /// </summary>
+    [Range(0, int.MaxValue)]
+    public int HealthCheckIntervalSeconds { get; set; }
+
+    /// <summary>
+    /// Se true, verifica che l'applicativo non sia in stato "non risponde".
+    /// Significativo solo su Windows per applicazioni con finestra (message pump):
+    /// su altre piattaforme o per processi console il controllo viene ignorato.
+    /// </summary>
+    public bool EnableNotRespondingCheck { get; set; }
+
+    /// <summary>
+    /// Soglia massima di memoria di lavoro (working set, in MB) tollerata.
+    /// Il valore 0 disabilita il controllo sulla memoria.
+    /// </summary>
+    [Range(0, long.MaxValue)]
+    public long MaxMemoryMB { get; set; }
+
+    /// <summary>
+    /// Soglia massima di utilizzo CPU (in percentuale, normalizzata sul totale dei core:
+    /// 0-100) tollerata. Il valore 0 disabilita il controllo sulla CPU.
+    /// </summary>
+    [Range(0, 100)]
+    public int MaxCpuPercent { get; set; }
+
+    /// <summary>
+    /// Numero di controlli di integrità falliti consecutivi tollerati prima di forzare
+    /// il riavvio dell'applicativo. Evita riavvii dovuti a picchi momentanei.
+    /// </summary>
+    [Range(1, int.MaxValue)]
+    public int UnhealthyChecksBeforeRestart { get; set; } = 3;
 }
