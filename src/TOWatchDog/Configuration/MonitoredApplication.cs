@@ -122,4 +122,35 @@ public sealed class MonitoredApplication
     /// </summary>
     [Range(1, int.MaxValue)]
     public int UnhealthyChecksBeforeRestart { get; set; } = 3;
+
+    // ----- Sonde di liveness attive -----
+
+    /// <summary>
+    /// Percorso di un file "heartbeat" che l'applicativo deve aggiornare periodicamente
+    /// (riscrivendone il contenuto o aggiornandone il timestamp) finché è vivo e reattivo.
+    /// Se l'ultima modifica del file diventa più vecchia di <see cref="HeartbeatTimeoutSeconds"/>,
+    /// il processo è considerato bloccato. Lasciare vuoto per disabilitare il controllo.
+    /// </summary>
+    public string? HeartbeatFilePath { get; set; }
+
+    /// <summary>
+    /// Età massima (in secondi) consentita per l'ultima modifica del file heartbeat.
+    /// Il valore 0 disabilita il controllo. Dopo l'avvio, l'applicativo dispone di questo
+    /// stesso intervallo per creare per la prima volta il file.
+    /// </summary>
+    [Range(0, int.MaxValue)]
+    public int HeartbeatTimeoutSeconds { get; set; }
+
+    /// <summary>
+    /// URL di un endpoint di health-check HTTP interrogato in GET: una risposta con codice
+    /// 2xx è considerata sana, qualsiasi altro esito (errore, timeout, codice non 2xx) è
+    /// considerato un fallimento. Lasciare vuoto per disabilitare il controllo.
+    /// </summary>
+    public string? HealthCheckUrl { get; set; }
+
+    /// <summary>
+    /// Timeout (in secondi) della richiesta HTTP di health-check.
+    /// </summary>
+    [Range(1, int.MaxValue)]
+    public int HealthCheckHttpTimeoutSeconds { get; set; } = 5;
 }

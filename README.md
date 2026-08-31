@@ -24,6 +24,9 @@ Può girare come normale applicazione console, come **servizio Windows** o come 
   - **memoria** (working set) oltre soglia;
   - **CPU** oltre soglia (percentuale normalizzata sul totale dei core);
   - tolleranza configurabile di N controlli falliti consecutivi prima del riavvio.
+- **Sonde di liveness attive** per rilevare app "vive ma bloccate" su qualsiasi piattaforma:
+  - **file heartbeat**: l'app aggiorna periodicamente un file; se smette, scatta il riavvio;
+  - **health-check HTTP**: GET su un endpoint, esito non 2xx/timeout considerato guasto.
 - Arresto controllato (graceful shutdown) dei processi sorvegliati allo stop del watchdog.
 - Variabili d'ambiente aggiuntive per processo.
 - Logging strutturato tramite `Microsoft.Extensions.Logging`.
@@ -83,6 +86,10 @@ Gli applicativi da sorvegliare si definiscono nella sezione `Watchdog:Applicatio
 | `MaxMemoryMB` | long | `0` | Soglia memoria working set in MB (`0` = disabilitato). |
 | `MaxCpuPercent` | int | `0` | Soglia CPU % sul totale dei core, 0-100 (`0` = disabilitato). |
 | `UnhealthyChecksBeforeRestart` | int | `3` | Controlli falliti consecutivi tollerati prima del riavvio forzato. |
+| `HeartbeatFilePath` | string | `null` | File heartbeat aggiornato dall'app (vuoto = disabilitato). |
+| `HeartbeatTimeoutSeconds` | int | `0` | Età massima dell'ultima modifica del file heartbeat (`0` = disabilitato). |
+| `HealthCheckUrl` | string | `null` | Endpoint HTTP interrogato in GET (vuoto = disabilitato). |
+| `HealthCheckHttpTimeoutSeconds` | int | `5` | Timeout della richiesta HTTP di health-check. |
 
 ### Monitoraggio risorse e stato "non risponde"
 
@@ -98,6 +105,33 @@ del processo (`Kill` dell'intero albero) e ne innesca il riavvio secondo le norm
 >
 > La percentuale CPU è **normalizzata sul totale dei core** (0-100): 100% significa saturazione di
 > tutti i core della macchina.
+
+### Sonde di liveness attive (file heartbeat / HTTP)
+
+Le sonde di liveness rilevano l'app **bloccata ma ancora in esecuzione** (deadlock, loop infinito,
+event loop fermo) su **qualsiasi piattaforma**, colmando i limiti di `NotResponding`. Anch'esse
+usano `HealthCheckIntervalSeconds` e `UnhealthyChecksBeforeRestart`.
+
+**File heartbeat** — richiede la cooperazione dell'applicativo, che deve **aggiornare
+periodicamente** il file indicato (riscriverlo o toccarne il timestamp) da un punto del codice che
+si ferma quando l'app si blocca (tipicamente un timer o il ciclo di lavoro principale). Il watchdog
+verifica solo l'età dell'ultima modifica: se supera `HeartbeatTimeoutSeconds`, forza il riavvio.
+Dopo l'avvio, l'app ha a disposizione lo stesso timeout per creare il file la prima volta.
+
+Esempio minimale lato applicativo (C#):
+
+```csharp
+// Da eseguire in un timer/loop finché l'app è viva e reattiva
+File.WriteAllText("/var/run/mio-servizio/heartbeat", DateTime.UtcNow.ToString("o"));
+```
+
+> Regola pratica: imposta `HeartbeatTimeoutSeconds` a un valore ampiamente superiore alla
+> frequenza con cui l'app aggiorna il file (es. l'app scrive ogni 10s → timeout 60s), per non
+> generare falsi positivi.
+
+**Health-check HTTP** — non richiede file: il watchdog interroga in GET l'`HealthCheckUrl` (es. un
+endpoint `/health` esposto dall'app). Una risposta **2xx** è considerata sana; un codice diverso,
+un errore di rete o un timeout (`HealthCheckHttpTimeoutSeconds`) contano come fallimento.
 
 ### Esempio
 

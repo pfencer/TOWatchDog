@@ -10,6 +10,12 @@ namespace TOWatchDog.Monitoring;
 /// </summary>
 public sealed class ApplicationSupervisor
 {
+    // HttpClient condiviso tra tutti i supervisori per le sonde di health-check HTTP.
+    private static readonly HttpClient HttpProbeClient = new()
+    {
+        Timeout = Timeout.InfiniteTimeSpan // il timeout effettivo è gestito per-richiesta.
+    };
+
     private readonly MonitoredApplication _app;
     private readonly ILogger _logger;
 
@@ -341,16 +347,20 @@ public sealed class ApplicationSupervisor
     }
 
     /// <summary>
-    /// Controlla periodicamente lo stato di integrità del processo (reattività, memoria, CPU).
+    /// Controlla periodicamente lo stato di integrità del processo: risorse (reattività,
+    /// memoria, CPU) e sonde di liveness attive (file heartbeat, endpoint HTTP).
     /// Restituisce true se, per il numero di controlli consecutivi configurato, il processo
     /// risulta non integro e va quindi forzato il riavvio. Termina restituendo false quando
     /// il monitor viene annullato o il processo esce autonomamente.
     /// </summary>
     private async Task<bool> MonitorHealthAsync(Process process, CancellationToken token)
     {
+        bool resourceChecks = _app.EnableNotRespondingCheck || _app.MaxMemoryMB > 0 || _app.MaxCpuPercent > 0;
+        bool heartbeatCheck = !string.IsNullOrWhiteSpace(_app.HeartbeatFilePath) && _app.HeartbeatTimeoutSeconds > 0;
+        bool httpCheck = !string.IsNullOrWhiteSpace(_app.HealthCheckUrl);
+
         // Nessun controllo configurato: resta in attesa passiva fino all'annullamento.
-        if (_app.HealthCheckIntervalSeconds <= 0 ||
-            (!_app.EnableNotRespondingCheck && _app.MaxMemoryMB <= 0 && _app.MaxCpuPercent <= 0))
+        if (_app.HealthCheckIntervalSeconds <= 0 || (!resourceChecks && !heartbeatCheck && !httpCheck))
         {
             try
             {
@@ -366,6 +376,9 @@ public sealed class ApplicationSupervisor
 
         var interval = TimeSpan.FromSeconds(_app.HealthCheckIntervalSeconds);
         int consecutiveUnhealthy = 0;
+
+        // Istante di avvio del monitor: base per il primo aggiornamento del file heartbeat.
+        DateTimeOffset monitorStart = DateTimeOffset.UtcNow;
 
         // Riferimenti per il calcolo incrementale dell'utilizzo CPU.
         DateTimeOffset lastSample = DateTimeOffset.UtcNow;
@@ -399,74 +412,80 @@ public sealed class ApplicationSupervisor
 
             var reasons = new List<string>();
 
-            try
+            // --- Sonda: file heartbeat (indipendente dalle metriche di processo) ---
+            if (heartbeatCheck)
             {
-                process.Refresh();
-            }
-            catch
-            {
-                // Se non è possibile aggiornare le informazioni del processo, salta il giro.
-                continue;
+                CheckHeartbeatFile(monitorStart, reasons);
             }
 
-            // Stato "non risponde" (solo Windows, app con finestra).
-            if (_app.EnableNotRespondingCheck && OperatingSystem.IsWindows())
+            // --- Sonda: endpoint HTTP (indipendente dalle metriche di processo) ---
+            if (httpCheck)
             {
-                try
+                await CheckHttpEndpointAsync(reasons, token);
+            }
+
+            // --- Metriche di processo (richiedono Refresh) ---
+            if (resourceChecks && TryRefresh(process))
+            {
+                // Stato "non risponde" (solo Windows, app con finestra).
+                if (_app.EnableNotRespondingCheck && OperatingSystem.IsWindows())
                 {
-                    if (!process.Responding)
+                    try
                     {
-                        reasons.Add("non risponde (NotResponding)");
-                    }
-                }
-                catch
-                {
-                    // Proprietà non applicabile a questo processo: ignorata.
-                }
-            }
-
-            // Memoria (working set).
-            if (_app.MaxMemoryMB > 0)
-            {
-                try
-                {
-                    long memMB = process.WorkingSet64 / (1024 * 1024);
-                    if (memMB > _app.MaxMemoryMB)
-                    {
-                        reasons.Add($"memoria {memMB} MB > {_app.MaxMemoryMB} MB");
-                    }
-                }
-                catch
-                {
-                    // Metrica non disponibile: ignorata.
-                }
-            }
-
-            // CPU (percentuale normalizzata sul totale dei core).
-            if (_app.MaxCpuPercent > 0 && cpuInitialized)
-            {
-                try
-                {
-                    var now = DateTimeOffset.UtcNow;
-                    var currentCpu = process.TotalProcessorTime;
-                    double cpuDeltaMs = (currentCpu - lastCpu).TotalMilliseconds;
-                    double wallDeltaMs = (now - lastSample).TotalMilliseconds;
-                    lastCpu = currentCpu;
-                    lastSample = now;
-
-                    if (wallDeltaMs > 0)
-                    {
-                        int cores = Math.Max(1, Environment.ProcessorCount);
-                        double cpuPercent = cpuDeltaMs / (wallDeltaMs * cores) * 100.0;
-                        if (cpuPercent > _app.MaxCpuPercent)
+                        if (!process.Responding)
                         {
-                            reasons.Add($"CPU {cpuPercent:F0}% > {_app.MaxCpuPercent}%");
+                            reasons.Add("non risponde (NotResponding)");
                         }
                     }
+                    catch
+                    {
+                        // Proprietà non applicabile a questo processo: ignorata.
+                    }
                 }
-                catch
+
+                // Memoria (working set).
+                if (_app.MaxMemoryMB > 0)
                 {
-                    // Metrica non disponibile: ignorata.
+                    try
+                    {
+                        long memMB = process.WorkingSet64 / (1024 * 1024);
+                        if (memMB > _app.MaxMemoryMB)
+                        {
+                            reasons.Add($"memoria {memMB} MB > {_app.MaxMemoryMB} MB");
+                        }
+                    }
+                    catch
+                    {
+                        // Metrica non disponibile: ignorata.
+                    }
+                }
+
+                // CPU (percentuale normalizzata sul totale dei core).
+                if (_app.MaxCpuPercent > 0 && cpuInitialized)
+                {
+                    try
+                    {
+                        var now = DateTimeOffset.UtcNow;
+                        var currentCpu = process.TotalProcessorTime;
+                        double cpuDeltaMs = (currentCpu - lastCpu).TotalMilliseconds;
+                        double wallDeltaMs = (now - lastSample).TotalMilliseconds;
+                        lastCpu = currentCpu;
+                        lastSample = now;
+
+                        if (wallDeltaMs > 0)
+                        {
+                            int cores = Math.Max(1, Environment.ProcessorCount);
+                            double cpuPercent = cpuDeltaMs / (wallDeltaMs * cores) * 100.0;
+                            if (cpuPercent > _app.MaxCpuPercent)
+                            {
+                                reasons.Add($"CPU {cpuPercent:F0}% > {_app.MaxCpuPercent}%");
+                            }
+                        }
+                    }
+                    catch
+                    {
+                        // Metrica non disponibile: ignorata.
+                    }
                 }
             }
 
@@ -490,6 +509,87 @@ public sealed class ApplicationSupervisor
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Verifica l'età dell'ultima modifica del file heartbeat. Se il file non esiste ancora,
+    /// l'età è calcolata dall'avvio del monitor, così l'applicativo dispone del timeout per
+    /// crearlo la prima volta. Aggiunge un motivo di fallimento se la soglia è superata.
+    /// </summary>
+    private void CheckHeartbeatFile(DateTimeOffset monitorStart, List<string> reasons)
+    {
+        try
+        {
+            var path = _app.HeartbeatFilePath!;
+            var timeout = TimeSpan.FromSeconds(_app.HeartbeatTimeoutSeconds);
+            DateTimeOffset lastActivity = File.Exists(path)
+                ? new DateTimeOffset(File.GetLastWriteTimeUtc(path), TimeSpan.Zero)
+                : monitorStart;
+
+            var age = DateTimeOffset.UtcNow - lastActivity;
+            if (age > timeout)
+            {
+                reasons.Add(
+                    $"heartbeat non aggiornato da {age.TotalSeconds:F0}s (> {_app.HeartbeatTimeoutSeconds}s)");
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex, "[{App}] Impossibile leggere il file heartbeat '{Path}'.",
+                _app.Name, _app.HeartbeatFilePath);
+            reasons.Add("file heartbeat non leggibile");
+        }
+    }
+
+    /// <summary>
+    /// Interroga in GET l'endpoint di health-check HTTP. Un esito diverso da 2xx (o un errore
+    /// di rete / timeout) aggiunge un motivo di fallimento.
+    /// </summary>
+    private async Task CheckHttpEndpointAsync(List<string> reasons, CancellationToken token)
+    {
+        var url = _app.HealthCheckUrl!;
+        var httpTimeout = TimeSpan.FromSeconds(_app.HealthCheckHttpTimeoutSeconds);
+
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+        timeoutCts.CancelAfter(httpTimeout);
+
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, url);
+            using var response = await HttpProbeClient.SendAsync(
+                request, HttpCompletionOption.ResponseHeadersRead, timeoutCts.Token);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                reasons.Add($"health-check HTTP: codice {(int)response.StatusCode}");
+            }
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested)
+        {
+            // Arresto del watchdog in corso: non è un fallimento dell'applicativo.
+        }
+        catch (OperationCanceledException)
+        {
+            reasons.Add($"health-check HTTP: timeout dopo {_app.HealthCheckHttpTimeoutSeconds}s");
+        }
+        catch (Exception ex)
+        {
+            reasons.Add($"health-check HTTP non raggiungibile ({ex.GetType().Name})");
+        }
+    }
+
+    private static bool TryRefresh(Process process)
+    {
+        try
+        {
+            process.Refresh();
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     /// <summary>
